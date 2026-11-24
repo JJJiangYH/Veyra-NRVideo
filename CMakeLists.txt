@@ -24,6 +24,15 @@ endif()
 # / Win32 bound, so the portable part of the pipeline lives in linux/ instead
 # of growing ifdefs through 100k lines of Windows code. See docs/OBS_FILTER.md.
 # ---------------------------------------------------------------------------
+if(APPLE)
+  option(VEYRA_BUILD_OBS_FILTER "Build the OBS filter instead of the macOS app" OFF)
+  if(VEYRA_BUILD_OBS_FILTER)
+    add_subdirectory(linux/obs)
+  else()
+    add_subdirectory(macos)
+  endif()
+  return()
+endif()
 if(NOT WIN32)
   add_subdirectory(linux/obs)
   return()

@@ -3,7 +3,7 @@
 // packages/player/src/client/lib, MIT): channel.ts, control.ts, message.ts, input.ts, sdp.ts.
 #include "veyra/xbox/WebRtcSession.h"
 
-#include <windows.h>
+#include <cstdlib>
 
 #include <rtc/rtc.hpp>
 
@@ -11,13 +11,18 @@
 #include <random>
 #include <sstream>
 
-#include "veyra/Log.h"
+#include "veyra/ProtocolLog.h"
 
 namespace veyra::xbox {
 namespace {
 
 using json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
+
+bool rtcDebug() {
+    const auto *value = std::getenv("VEYRA_XBOX_RTC_DEBUG");
+    return value && *value;
+}
 
 int64_t host100ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count() / 100;
@@ -50,7 +55,7 @@ void logOnce() {
     static std::once_flag once;
     std::call_once(once, [] {
         // VEYRA_XBOX_RTC_DEBUG=1 logs libdatachannel's ICE/DTLS/SCTP details (for field diagnosis).
-        const bool debug = GetEnvironmentVariableA("VEYRA_XBOX_RTC_DEBUG", nullptr, 0) > 0;
+        const bool debug = rtcDebug();
         rtc::InitLogger(debug ? rtc::LogLevel::Verbose : rtc::LogLevel::Info, [](rtc::LogLevel level, std::string text) {
             if (level <= rtc::LogLevel::Error) log::warn("xbox-rtc", text);
             else log::info("xbox-rtc", text);
@@ -201,7 +206,7 @@ bool WebRtcSession::start(Signaling& signaling, std::string* error, std::chrono:
         std::string text = c.candidate();
         if (text.rfind("a=", 0) == 0) text = text.substr(2);
         candidates.push_back({text, c.mid(), c.mid() == "0" ? 0 : (c.mid() == "1" ? 1 : 2)});
-        if (GetEnvironmentVariableA("VEYRA_XBOX_RTC_DEBUG", nullptr, 0) > 0) log::info("xbox", "local candidate [" + text + "] mid " + c.mid());
+        if (rtcDebug()) log::info("xbox", "local candidate [" + text + "] mid " + c.mid());
     }
     log::info("xbox", "offer codecs:\n" + describeCodecs(offer));
     // The whole offer (no candidates, no account data): a refused offer can then be compared
@@ -232,7 +237,7 @@ bool WebRtcSession::start(Signaling& signaling, std::string* error, std::chrono:
         std::string text = c.candidate;
         if (text.rfind("a=", 0) == 0) text = text.substr(2);
         while (!text.empty() && text.back() == ' ') text.pop_back();
-        if (GetEnvironmentVariableA("VEYRA_XBOX_RTC_DEBUG", nullptr, 0) > 0) log::info("xbox", "remote candidate [" + text + "] mid " + c.sdpMid);
+        if (rtcDebug()) log::info("xbox", "remote candidate [" + text + "] mid " + c.sdpMid);
         try {
             pc_->addRemoteCandidate(rtc::Candidate(text, c.sdpMid.empty() ? "0" : c.sdpMid));
             ++added;

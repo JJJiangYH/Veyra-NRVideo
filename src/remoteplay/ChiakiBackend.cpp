@@ -2,7 +2,7 @@
 // Uses chiaki-ng's AGPL-3.0-only + OpenSSL-exception APIs; retain both licenses.
 // Windows native initialization and source regression evidence: see execution log.
 #include "veyra/remoteplay/ChiakiBackend.h"
-#include "veyra/Log.h"
+#include "veyra/ProtocolLog.h"
 #include <format>
 #include <chiaki/session.h>
 #if !defined(CHIAKI_VEYRA_VIDEO_METADATA_API) || CHIAKI_VEYRA_VIDEO_METADATA_API != 1

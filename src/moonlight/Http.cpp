@@ -1,8 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "veyra/moonlight/Http.h"
 
+#ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+#include <cerrno>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 #include <openssl/bio.h>
 #include <openssl/err.h>
@@ -26,11 +36,39 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+#ifdef _WIN32
 struct WsaInit {
     WsaInit() { WSADATA data; WSAStartup(MAKEWORD(2, 2), &data); }
     ~WsaInit() { WSACleanup(); }
 };
-void ensureWinsock() { static WsaInit init; }
+void ensureSockets() { static WsaInit init; }
+using SocketHandle = SOCKET;
+using SocketLength = int;
+constexpr SocketHandle invalidSocket = INVALID_SOCKET;
+void closeSocket(SocketHandle socket) { closesocket(socket); }
+bool wouldBlock() { return WSAGetLastError() == WSAEWOULDBLOCK; }
+bool connectPending() { return wouldBlock(); }
+bool setNonblocking(SocketHandle socket) {
+    u_long enabled = 1;
+    return ioctlsocket(socket, FIONBIO, &enabled) == 0;
+}
+#else
+void ensureSockets() {}
+using SocketHandle = int;
+using SocketLength = socklen_t;
+constexpr SocketHandle invalidSocket = -1;
+void closeSocket(SocketHandle socket) { close(socket); }
+bool wouldBlock() { return errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR; }
+bool connectPending() { return errno == EINPROGRESS || wouldBlock(); }
+bool setNonblocking(SocketHandle socket) {
+    const int enabled = 1;
+#ifdef SO_NOSIGPIPE
+    setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
+#endif
+    const int flags = fcntl(socket, F_GETFL, 0);
+    return flags >= 0 && fcntl(socket, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+#endif
 
 struct Wait {
     Clock::time_point deadline;
@@ -46,9 +84,10 @@ void check(const Wait& w) {
 // Waits until the socket is ready (or has failed: a refused non-blocking connect
 // is reported through the except set on Windows). Slices of 50 ms keep the
 // cancel flag and the deadline responsive.
-void waitSocket(SOCKET s, bool forRead, bool forWrite, const Wait& w) {
+void waitSocket(SocketHandle s, bool forRead, bool forWrite, const Wait& w) {
     for (;;) {
         check(w);
+#ifdef _WIN32
         fd_set readSet, writeSet, errorSet;
         FD_ZERO(&readSet); FD_ZERO(&writeSet); FD_ZERO(&errorSet);
         if (forRead) FD_SET(s, &readSet);
@@ -58,21 +97,28 @@ void waitSocket(SOCKET s, bool forRead, bool forWrite, const Wait& w) {
         const int ready = select(0, &readSet, &writeSet, &errorSet, &slice);
         if (ready > 0) return;
         if (ready == SOCKET_ERROR) throw TransportError(TransportError::Kind::Connect, "select failed");
+#else
+        pollfd watched{s, short((forRead ? POLLIN : 0) | (forWrite ? POLLOUT : 0)), 0};
+        const int ready = poll(&watched, 1, 50);
+        if (ready > 0) return;
+        if (ready < 0 && errno != EINTR)
+            throw TransportError(TransportError::Kind::Connect, "poll failed");
+#endif
     }
 }
 
 struct Socket {
-    SOCKET handle = INVALID_SOCKET;
+    SocketHandle handle = invalidSocket;
     Socket() = default;
-    explicit Socket(SOCKET s) : handle(s) {}
+    explicit Socket(SocketHandle s) : handle(s) {}
     Socket(const Socket&) = delete;
     Socket& operator=(const Socket&) = delete;
-    ~Socket() { if (handle != INVALID_SOCKET) closesocket(handle); }
+    ~Socket() { if (handle != invalidSocket) closeSocket(handle); }
 };
 
 struct AddrInfoFree { void operator()(addrinfo* p) const { freeaddrinfo(p); } };
 
-SOCKET connectSocket(const std::string& host, uint16_t port, const Wait& overall) {
+SocketHandle connectSocket(const std::string& host, uint16_t port, const Wait& overall) {
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -85,10 +131,9 @@ SOCKET connectSocket(const std::string& host, uint16_t port, const Wait& overall
     size_t candidates = 0;
     for (addrinfo* ai = raw; ai; ai = ai->ai_next) ++candidates;
     for (addrinfo* ai = raw; ai; ai = ai->ai_next) {
-        SOCKET s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (s == INVALID_SOCKET) continue;
-        u_long nonBlocking = 1;
-        ioctlsocket(s, FIONBIO, &nonBlocking);
+        SocketHandle s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s == invalidSocket) continue;
+        if (!setNonblocking(s)) { closeSocket(s); continue; }
         // With several candidate addresses one unreachable family must not eat the whole budget.
         Wait attempt = overall;
         if (candidates > 1) {
@@ -96,21 +141,21 @@ SOCKET connectSocket(const std::string& host, uint16_t port, const Wait& overall
             if (attempt.infinite || cap < attempt.deadline) { attempt.deadline = cap; attempt.infinite = false; }
         }
         const int result = connect(s, ai->ai_addr, int(ai->ai_addrlen));
-        if (result == SOCKET_ERROR) {
-            if (WSAGetLastError() != WSAEWOULDBLOCK) { closesocket(s); continue; }
+        if (result < 0) {
+            if (!connectPending()) { closeSocket(s); continue; }
             try {
                 waitSocket(s, false, true, attempt);
             } catch (const TransportError& e) {
-                closesocket(s);
+                closeSocket(s);
                 if (e.kind == TransportError::Kind::Timeout && candidates > 1 && Clock::now() < overall.deadline) continue;
                 throw;
             }
             int error = 0;
-            int length = sizeof(error);
+            SocketLength length = sizeof(error);
             getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &length);
-            if (error != 0) { closesocket(s); continue; }
+            if (error != 0) { closeSocket(s); continue; }
         }
-        BOOL noDelay = TRUE;
+        int noDelay = 1;
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
         return s;
     }
@@ -142,7 +187,7 @@ std::unique_ptr<SSL_CTX, CtxFree> makeContext(const Identity& identity) {
 // One connection, plain or TLS, read and written under the same deadline.
 class Connection {
 public:
-    Connection(SOCKET socket, SSL* ssl, const Wait& wait) : socket_(socket), ssl_(ssl), wait_(wait) {}
+    Connection(SocketHandle socket, SSL* ssl, const Wait& wait) : socket_(socket), ssl_(ssl), wait_(wait) {}
 
     void writeAll(std::string_view data) {
         size_t sent = 0;
@@ -159,7 +204,7 @@ public:
             } else {
                 const int n = send(socket_, data.data() + sent, chunk, 0);
                 if (n > 0) { sent += size_t(n); continue; }
-                if (WSAGetLastError() == WSAEWOULDBLOCK) waitSocket(socket_, false, true, wait_);
+                if (wouldBlock()) waitSocket(socket_, false, true, wait_);
                 else throw TransportError(TransportError::Kind::Connect, "send failed");
             }
         }
@@ -183,7 +228,7 @@ public:
                 const int n = recv(socket_, buffer, int(std::min<size_t>(capacity, 1 << 16)), 0);
                 if (n > 0) { receivedAny_ = true; return size_t(n); }
                 if (n == 0) return 0;
-                if (WSAGetLastError() == WSAEWOULDBLOCK) waitSocket(socket_, true, false, wait_);
+                if (wouldBlock()) waitSocket(socket_, true, false, wait_);
                 else if (receivedAny_) return 0;
                 else throw TransportError(TransportError::Kind::Connect, "receive failed");
             }
@@ -191,7 +236,7 @@ public:
     }
 
 private:
-    SOCKET socket_;
+    SocketHandle socket_;
     SSL* ssl_;
     Wait wait_;
     bool receivedAny_ = false;
@@ -303,7 +348,7 @@ HttpClient::HttpClient(const Identity* identity, std::string pinnedServerCertPem
     : identity_(identity), pinned_(std::move(pinnedServerCertPem)) {}
 
 HttpResponse HttpClient::get(const HttpTarget& target, const std::string& pathAndQuery, const HttpOptions& options) const {
-    ensureWinsock();
+    ensureSockets();
     Wait wait;
     wait.infinite = options.timeoutMs <= 0;
     wait.deadline = Clock::now() + std::chrono::milliseconds(std::max(0, options.timeoutMs));

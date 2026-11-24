@@ -48,6 +48,9 @@ public:
 
 // WinHTTP implementation. `cancel`, when set, aborts between steps of a request.
 std::shared_ptr<HttpsTransport> makeWinHttpTransport(const std::atomic<bool>* cancel = nullptr);
+#ifdef __APPLE__
+std::shared_ptr<HttpsTransport> makeMacHttpsTransport(const std::atomic<bool>* cancel = nullptr);
+#endif
 
 // Form-urlencodes one value.
 std::string urlEncode(const std::string& text);

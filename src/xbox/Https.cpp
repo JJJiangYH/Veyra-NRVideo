@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "veyra/xbox/Https.h"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <winhttp.h>
 
 #include <vector>
+#endif
 
 namespace veyra::xbox {
+#ifdef _WIN32
 namespace {
 
 std::wstring widen(const std::string& text) {
@@ -95,6 +98,7 @@ private:
 std::shared_ptr<HttpsTransport> makeWinHttpTransport(const std::atomic<bool>* cancel) {
     return std::make_shared<WinHttpTransport>(cancel);
 }
+#endif
 
 std::string urlEncode(const std::string& text) {
     static const char* hex = "0123456789ABCDEF";

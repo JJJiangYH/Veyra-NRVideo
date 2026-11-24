@@ -2,9 +2,11 @@
 // Sign-in sequence ported from xal-node's Msal class (unknownskl/xal-node, MIT) as used by Greenlight.
 #include "veyra/xbox/Account.h"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <shlobj.h>
 #include <wincrypt.h>
+#endif
 
 #include <chrono>
 #include <cstdio>
@@ -27,10 +29,20 @@ int64_t systemNow() {
 // "2026-10-01T12:34:56.1234567Z" -> unix seconds (0 when it does not parse).
 int64_t parseTime(const std::string& text) {
     std::tm t{};
-    if (sscanf_s(text.c_str(), "%d-%d-%dT%d:%d:%d", &t.tm_year, &t.tm_mon, &t.tm_mday, &t.tm_hour, &t.tm_min, &t.tm_sec) != 6) return 0;
+    const char* pattern = "%d-%d-%dT%d:%d:%d";
+#ifdef _WIN32
+    const int parsed = sscanf_s(text.c_str(), pattern, &t.tm_year, &t.tm_mon, &t.tm_mday, &t.tm_hour, &t.tm_min, &t.tm_sec);
+#else
+    const int parsed = std::sscanf(text.c_str(), pattern, &t.tm_year, &t.tm_mon, &t.tm_mday, &t.tm_hour, &t.tm_min, &t.tm_sec);
+#endif
+    if (parsed != 6) return 0;
     t.tm_year -= 1900;
     t.tm_mon -= 1;
+#ifdef _WIN32
     return int64_t(_mkgmtime(&t));
+#else
+    return int64_t(timegm(&t));
+#endif
 }
 
 json parse(const HttpsResponse& response, const char* what) {
@@ -81,6 +93,7 @@ HttpsRequest xblPost(const char* host, const char* path, const json& body) {
     return r;
 }
 
+#ifdef _WIN32
 std::vector<uint8_t> protect(const std::string& plain) {
     DATA_BLOB in{DWORD(plain.size()), reinterpret_cast<BYTE*>(const_cast<char*>(plain.data()))};
     DATA_BLOB out{};
@@ -99,9 +112,11 @@ std::optional<std::string> unprotect(std::vector<uint8_t> bytes) {
     LocalFree(out.pbData);
     return plain;
 }
+#endif
 
 } // namespace
 
+#ifdef _WIN32
 std::filesystem::path dataDirectory() {
     wchar_t override[MAX_PATH] = {};
     if (GetEnvironmentVariableW(L"VEYRA_XBOX_DATA", override, MAX_PATH) > 0) return std::filesystem::path(override);
@@ -151,6 +166,9 @@ bool saveTokens(const std::filesystem::path& file, const SavedTokens& tokens) {
     std::filesystem::rename(temp, file, ec);
     return !ec;
 }
+#else
+void removeTokens(const std::filesystem::path& file);
+#endif
 
 std::wstring describeXboxError(const std::string& responseBody) {
     try {
@@ -183,8 +201,12 @@ void Account::signOut() {
     tokens_.reset();
     userToken_.clear();
     streaming_.reset();
+#ifdef _WIN32
     std::error_code ec;
     std::filesystem::remove(file_, ec);
+#else
+    removeTokens(file_);
+#endif
 }
 
 void Account::store() {

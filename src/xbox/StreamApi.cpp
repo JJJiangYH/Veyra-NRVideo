@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "veyra/xbox/StreamApi.h"
-#include "veyra/Log.h"
+#include "veyra/ProtocolLog.h"
 
+#ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#endif
 
 #include <chrono>
 #include <cstdlib>
@@ -189,7 +193,11 @@ std::string StreamApi::exchangeSdp(const std::string& sessionId, const std::stri
 
 bool StreamApi::teredoIpv4(const std::string& ipv6, std::string* ipv4, int* port) {
     in6_addr address{};
+#ifdef _WIN32
     if (InetPtonA(AF_INET6, ipv6.c_str(), &address) != 1) return false;
+#else
+    if (inet_pton(AF_INET6, ipv6.c_str(), &address) != 1) return false;
+#endif
     const uint8_t* b = address.s6_addr;
     if (!(b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x00 && b[3] == 0x00)) return false;
     const int p = ((b[10] << 8) | b[11]) ^ 0xFFFF;

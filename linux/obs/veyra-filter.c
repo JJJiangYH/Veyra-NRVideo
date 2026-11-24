@@ -37,6 +37,7 @@ struct veyra_filter {
 	gs_eparam_t *param_lut_size;
 
 	gs_texture_t *lut;          // volume texture, owned
+	gs_texture_t *identity_lut;
 	char *lut_path;             // as configured
 	char *lut_loaded_path;      // last file that produced `lut`
 	int lut_size;
@@ -155,6 +156,14 @@ static void *veyra_filter_create(obs_data_t *settings, obs_source_t *context)
 	// thread owns; frontend callbacks must borrow it.
 	obs_enter_graphics();
 	filter->effect = gs_effect_create_from_file(path, &error);
+	const uint8_t identity[] = {
+		0, 0, 0, 255,   255, 0, 0, 255,
+		0, 255, 0, 255, 255, 255, 0, 255,
+		0, 0, 255, 255, 255, 0, 255, 255,
+		0, 255, 255, 255, 255, 255, 255, 255,
+	};
+	const uint8_t *identity_data = identity;
+	filter->identity_lut = gs_voltexture_create(2, 2, 2, GS_RGBA, 1, &identity_data, 0);
 	obs_leave_graphics();
 	if (!filter->effect)
 		blog(LOG_ERROR, "[veyra] effect load failed: %s", error ? error : "(no error text)");
@@ -183,12 +192,12 @@ static void veyra_filter_destroy(void *data)
 	struct veyra_filter *filter = data;
 
 	free_lut(filter);
-	if (filter->effect) {
-		obs_enter_graphics();
+	obs_enter_graphics();
+	if (filter->effect)
 		gs_effect_destroy(filter->effect);
-		obs_leave_graphics();
-		filter->effect = NULL;
-	}
+	if (filter->identity_lut)
+		gs_texture_destroy(filter->identity_lut);
+	obs_leave_graphics();
 	bfree(filter->lut_path);
 	bfree(filter);
 }
@@ -225,17 +234,13 @@ static void veyra_filter_render(void *data, gs_effect_t *unused)
 	const bool lut_on = filter->lut != NULL && filter->lut_strength > 0;
 	gs_effect_set_bool(filter->param_lut_enabled, lut_on);
 	gs_effect_set_float(filter->param_lut_amount, (float)filter->lut_strength / 100.0f);
-	if (lut_on) {
-        gs_effect_set_float(filter->param_lut_size, (float)filter->lut_size);
-		gs_effect_set_texture(filter->param_lut_texture, filter->lut);
-		struct vec3 domain_min, domain_max;
-		vec3_set(&domain_min, filter->lut_domain_min[0], filter->lut_domain_min[1],
-			 filter->lut_domain_min[2]);
-		vec3_set(&domain_max, filter->lut_domain_max[0], filter->lut_domain_max[1],
-			 filter->lut_domain_max[2]);
-		gs_effect_set_vec3(filter->param_lut_domain_min, &domain_min);
-		gs_effect_set_vec3(filter->param_lut_domain_max, &domain_max);
-	}
+	gs_effect_set_float(filter->param_lut_size, lut_on ? (float)filter->lut_size : 2.0f);
+	gs_effect_set_texture(filter->param_lut_texture, lut_on ? filter->lut : filter->identity_lut);
+	struct vec3 domain_min, domain_max;
+	vec3_set(&domain_min, filter->lut_domain_min[0], filter->lut_domain_min[1], filter->lut_domain_min[2]);
+	vec3_set(&domain_max, filter->lut_domain_max[0], filter->lut_domain_max[1], filter->lut_domain_max[2]);
+	gs_effect_set_vec3(filter->param_lut_domain_min, &domain_min);
+	gs_effect_set_vec3(filter->param_lut_domain_max, &domain_max);
 
 	obs_source_process_filter_tech_end(filter->context, filter->effect, width, height, "Draw");
 }
@@ -283,8 +288,15 @@ struct obs_source_info veyra_filter_info = {
 	.video_render = veyra_filter_render,
 };
 
+#ifdef __APPLE__
+extern struct obs_source_info veyra_processed_video;
+#endif
+
 bool obs_module_load(void)
 {
+#ifdef __APPLE__
+    obs_register_source(&veyra_processed_video);
+#endif
 	obs_register_source(&veyra_filter_info);
 	blog(LOG_INFO, "[veyra] filter registered (%s)", VEYRA_FILTER_ID);
 	return true;
